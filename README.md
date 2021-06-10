@@ -23,7 +23,7 @@ All of the tests for KIF are written in Objective-C. This allows for maximum int
 KIF integrates directly into your Xcode project, so there's no need to run an additional web server or install any additional packages.
 
 #### Wide OS and Xcode coverage
-KIF's test suite is being run against iOS 8+ and Xcode 7+. Lower versions will likely still work, but your mileage may vary. We do our best to retain backwards compatibility as much as possible.
+KIF's test suite is being run against iOS 8+ and Xcode 7+. Lower ver
 
 #### Test Like a User
 KIF attempts to imitate actual user input. Automation is done using tap events wherever possible.
