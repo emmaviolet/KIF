@@ -32,9 +32,15 @@ MAKE_CATEGORIES_LOADABLE(UIAccessibilityElement_KIFAdditions)
     while (element && ![element isKindOfClass:[UIView class]]) {
         // Sometimes accessibilityContainer will return a view that's too far up the view hierarchy
         // UIAccessibilityElement instances will sometimes respond to view, so try to use that and then fall back to accessibilityContainer
-        id view = [element respondsToSelector:@selector(view)] ? [(id)element view]
-        : [element respondsToSelector:@selector(tableViewCell)] ? [(id)element tableViewCell]
-        : nil;
+        id view = nil;
+        
+        if([element respondsToSelector:@selector(view)]) {
+            view = [(id)element view];
+        } else if([element respondsToSelector:@selector(tableViewCell)]) {
+            view = [(id)element tableViewCell];
+        } else if([element isKindOfClass:NSClassFromString(@"UIAccessibilityElementMockView")]) {
+            view = [element valueForKey:@"view"];
+        }
         
         if (view) {
             element = view;
@@ -53,12 +59,17 @@ MAKE_CATEGORIES_LOADABLE(UIAccessibilityElement_KIFAdditions)
 
 + (BOOL)accessibilityElement:(out UIAccessibilityElement **)foundElement view:(out UIView **)foundView withLabel:(NSString *)label value:(NSString *)value traits:(UIAccessibilityTraits)traits fromRootView:(UIView *)fromView tappable:(BOOL)mustBeTappable error:(out NSError **)error
 {
+    return [self accessibilityElement:foundElement view:foundView withLabel:label value:value traits:traits fromRootView:fromView tappable:mustBeTappable error:error disableScroll:NO];
+}
+
++ (BOOL)accessibilityElement:(out UIAccessibilityElement **)foundElement view:(out UIView **)foundView withLabel:(NSString *)label value:(NSString *)value traits:(UIAccessibilityTraits)traits fromRootView:(UIView *)fromView tappable:(BOOL)mustBeTappable error:(out NSError **)error disableScroll:(BOOL)scrollDisabled
+{
     UIAccessibilityElement *element = [self accessibilityElementWithLabel:label value:value traits:traits fromRootView:fromView error:error];
     if (!element) {
         return NO;
     }
     
-    UIView *view = [self viewContainingAccessibilityElement:element tappable:mustBeTappable error:error];
+    UIView *view = [self viewContainingAccessibilityElement:element tappable:mustBeTappable error:error disableScroll:scrollDisabled];
     if (!view) {
         return NO;
     }
@@ -77,18 +88,23 @@ MAKE_CATEGORIES_LOADABLE(UIAccessibilityElement_KIFAdditions)
 
 + (BOOL)accessibilityElement:(out UIAccessibilityElement **)foundElement view:(out UIView **)foundView withElementMatchingPredicate:(NSPredicate *)predicate tappable:(BOOL)mustBeTappable error:(out NSError **)error;
 {
+    return [self accessibilityElement:foundElement view:foundView withElementMatchingPredicate:predicate tappable:mustBeTappable error:error disableScroll:NO];
+}
+
++ (BOOL)accessibilityElement:(out UIAccessibilityElement **)foundElement view:(out UIView **)foundView withElementMatchingPredicate:(NSPredicate *)predicate tappable:(BOOL)mustBeTappable error:(out NSError **)error disableScroll:(BOOL)scrollDisabled;
+{
     UIAccessibilityElement *element = [[UIApplication sharedApplication] accessibilityElementMatchingBlock:^BOOL(UIAccessibilityElement *element) {
         return [predicate evaluateWithObject:element];
-    }];
-    
+    } disableScroll: scrollDisabled];
+
     if (!element) {
         if (error) {
-            *error = [self errorForFailingPredicate:predicate];
+            *error = [self errorForFailingPredicate:predicate disableScroll:scrollDisabled];
         }
         return NO;
     }
     
-    UIView *view = [UIAccessibilityElement viewContainingAccessibilityElement:element tappable:mustBeTappable error:error];
+    UIView *view = [UIAccessibilityElement viewContainingAccessibilityElement:element tappable:mustBeTappable error:error disableScroll:scrollDisabled];
     if (!view) {
         return NO;
     }
@@ -100,10 +116,15 @@ MAKE_CATEGORIES_LOADABLE(UIAccessibilityElement_KIFAdditions)
 
 + (BOOL)accessibilityElement:(out UIAccessibilityElement *__autoreleasing *)foundElement view:(out UIView *__autoreleasing *)foundView withElementMatchingPredicate:(NSPredicate *)predicate fromRootView:(UIView *)fromView tappable:(BOOL)mustBeTappable error:(out NSError *__autoreleasing *)error
 {
+    return [self accessibilityElement:foundElement view:foundView withElementMatchingPredicate:predicate fromRootView:fromView tappable:mustBeTappable error:error disableScroll:NO];
+}
+
++ (BOOL)accessibilityElement:(out UIAccessibilityElement *__autoreleasing *)foundElement view:(out UIView *__autoreleasing *)foundView withElementMatchingPredicate:(NSPredicate *)predicate fromRootView:(UIView *)fromView tappable:(BOOL)mustBeTappable error:(out NSError *__autoreleasing *)error disableScroll:(BOOL)scrollDisabled
+{
     UIAccessibilityElement *element = [fromView accessibilityElementMatchingBlock:^BOOL(UIAccessibilityElement *element) {
         return [predicate evaluateWithObject:element];
-    }];
-    
+    } disableScroll:scrollDisabled];
+
     if (!element) {
         if (error) {
             *error = [NSError KIFErrorWithFormat:@"Could not find view matching: %@", predicate];
@@ -111,7 +132,7 @@ MAKE_CATEGORIES_LOADABLE(UIAccessibilityElement_KIFAdditions)
         return NO;
     }
     
-    UIView *view = [UIAccessibilityElement viewContainingAccessibilityElement:element tappable:mustBeTappable error:error];
+    UIView *view = [UIAccessibilityElement viewContainingAccessibilityElement:element tappable:mustBeTappable error:error disableScroll:scrollDisabled];
     if (!view) {
         return NO;
     }
@@ -158,6 +179,11 @@ MAKE_CATEGORIES_LOADABLE(UIAccessibilityElement_KIFAdditions)
 
 + (UIView *)viewContainingAccessibilityElement:(UIAccessibilityElement *)element tappable:(BOOL)mustBeTappable error:(NSError **)error;
 {
+    return [self viewContainingAccessibilityElement:element tappable:mustBeTappable error:error disableScroll:NO];
+}
+
++ (UIView *)viewContainingAccessibilityElement:(UIAccessibilityElement *)element tappable:(BOOL)mustBeTappable error:(NSError **)error disableScroll:(BOOL)scrollDisabled;
+{
     // Small safety mechanism.  If someone calls this method after a failing call to accessibilityElementWithLabel:..., we don't want to wipe out the error message.
     if (!element && error && *error) {
         return nil;
@@ -172,58 +198,53 @@ MAKE_CATEGORIES_LOADABLE(UIAccessibilityElement_KIFAdditions)
         return nil;
     }
 
-    // Scroll the view (and superviews) to be visible if necessary
-    UIView *superview = view;
-    while (superview) {
-        if ([superview isKindOfClass:[UIScrollView class]]) {
-            UIScrollView *scrollView = (UIScrollView *)superview;
-            BOOL animationEnabled = [KIFUITestActor testActorAnimationsEnabled];
-            
-            if (((UIAccessibilityElement *)view == element) && ![view isKindOfClass:[UITableViewCell class]]) {
-                [scrollView scrollViewToVisible:view animated:animationEnabled];
-            } else {
-                if ([view isKindOfClass:[UITableViewCell class]] && [scrollView.superview isKindOfClass:[UITableView class]]) {
-                    UITableViewCell *cell = (UITableViewCell *)view;
-                    UITableView *tableView = (UITableView *)scrollView.superview;
-                    NSIndexPath *indexPath = [tableView indexPathForCell:cell];
-                    [tableView scrollToRowAtIndexPath:indexPath atScrollPosition:UITableViewScrollPositionNone animated:animationEnabled];
+    if(!scrollDisabled) {
+        // Scroll the view (and superviews) to be visible if necessary
+        UIView *superview = view;
+        while (superview) {
+            if ([superview isKindOfClass:[UIScrollView class]]) {
+                UIScrollView *scrollView = (UIScrollView *)superview;
+                BOOL animationEnabled = [KIFUITestActor testActorAnimationsEnabled];
+
+                if (((UIAccessibilityElement *)view == element) && ![view isKindOfClass:[UITableViewCell class]]) {
+                    [scrollView scrollViewToVisible:view animated:animationEnabled];
                 } else {
-                    CGRect elementFrame = [view.window convertRect:element.accessibilityFrame toView:scrollView];
-                    CGRect visibleRect = CGRectMake(scrollView.contentOffset.x, scrollView.contentOffset.y, CGRectGetWidth(scrollView.bounds), CGRectGetHeight(scrollView.bounds));
+                    if ([view isKindOfClass:[UITableViewCell class]] && [scrollView.superview isKindOfClass:[UITableView class]]) {
+                        UITableViewCell *cell = (UITableViewCell *)view;
+                        UITableView *tableView = (UITableView *)scrollView.superview;
+                        NSIndexPath *indexPath = [tableView indexPathForCell:cell];
+                        [tableView scrollToRowAtIndexPath:indexPath atScrollPosition:UITableViewScrollPositionNone animated:animationEnabled];
+                    } else {
+                        CGRect elementFrame = [view.window convertRect:element.accessibilityFrame toView:scrollView];
+                        CGRect visibleRect = CGRectMake(scrollView.contentOffset.x, scrollView.contentOffset.y, CGRectGetWidth(scrollView.bounds), CGRectGetHeight(scrollView.bounds));
 
-                    UIEdgeInsets contentInset;
-#ifdef __IPHONE_11_0
-                        if (@available(iOS 11.0, *)) {
-                            contentInset = scrollView.adjustedContentInset;
-                        } else {
-                            contentInset = scrollView.contentInset;
+                        UIEdgeInsets contentInset = scrollView.adjustedContentInset;
+                        visibleRect = UIEdgeInsetsInsetRect(visibleRect, contentInset);
+
+                        // Only call scrollRectToVisible if the element isn't already visible
+                        // iOS 8 will sometimes incorrectly scroll table views so the element scrolls out of view
+                        if (!CGRectContainsRect(visibleRect, elementFrame)) {
+                            [scrollView scrollRectToVisible:elementFrame animated:animationEnabled];
                         }
-#else
-                        contentInset = scrollView.contentInset;
-#endif
-                    visibleRect = UIEdgeInsetsInsetRect(visibleRect, contentInset);
+                    }
 
-                    // Only call scrollRectToVisible if the element isn't already visible
-                    // iOS 8 will sometimes incorrectly scroll table views so the element scrolls out of view
-                    if (!CGRectContainsRect(visibleRect, elementFrame)) {
-                        [scrollView scrollRectToVisible:elementFrame animated:animationEnabled];
+                    // Give the scroll view a small amount of time to perform the scroll.
+                    CFTimeInterval delay = animationEnabled ? 0.3 : 0.05;
+                    KIFRunLoopRunInModeRelativeToAnimationSpeed(kCFRunLoopDefaultMode, delay, false);
+
+                    // Because of cell reuse the first found view could be different after we scroll.
+                    // Find the same element's view to ensure that after we have scrolled we get the same view back.
+                    UIView *checkedView = [UIAccessibilityElement viewContainingAccessibilityElement:element];
+                    // intentionally doing a memory address check vs a isEqual check because
+                    // we want to ensure that the memory address hasn't changed after scroll.
+                    if(view != checkedView) {
+                        view = checkedView;
                     }
                 }
-
-                // Give the scroll view a small amount of time to perform the scroll.
-                CFTimeInterval delay = animationEnabled ? 0.3 : 0.05;
-                KIFRunLoopRunInModeRelativeToAnimationSpeed(kCFRunLoopDefaultMode, delay, false);
             }
-        }
-        
-        superview = superview.superview;
-    }
 
-    if ([[UIApplication sharedApplication] isIgnoringInteractionEvents]) {
-        if (error) {
-            *error = [NSError KIFErrorWithFormat:@"Application is ignoring interaction events"];
+            superview = superview.superview;
         }
-        return nil;
     }
     
     // If we don't require tappability, at least make sure it's not hidden
@@ -235,18 +256,68 @@ MAKE_CATEGORIES_LOADABLE(UIAccessibilityElement_KIFAdditions)
     }
     
     if (mustBeTappable && !view.isProbablyTappable) {
+        // The scroll pass above only scrolls when the element lies outside its scroll view's
+        // visible rect. An element inside the visible rect can still fail hit-testing when a
+        // floating overlay (e.g. a tab bar or toolbar) covers it. Center the element in its
+        // scroll ancestor's viewport, which moves it clear of edge-anchored overlays, and
+        // resolve once more with scrolling disabled.
+        if (!scrollDisabled && [self KIF_revealPossiblyCoveredAccessibilityElement:element view:view]) {
+            return [self viewContainingAccessibilityElement:element tappable:mustBeTappable error:error disableScroll:YES];
+        }
         if (error) {
             *error = [NSError KIFErrorWithFormat:@"Accessibility element %@ for view %@ with label \"%@\" is not tappable. It may be blocked by other views.", element, view, element.accessibilityLabel];
         }
         return nil;
     }
-    
+
     return view;
 }
 
-+ (NSError *)errorForFailingPredicate:(NSPredicate*)failingPredicate;
+// Attempts to uncover an element that resolved to a view but failed the tappability check by
+// centering it vertically in its nearest scroll ancestor's inset-adjusted viewport.
+// Returns YES if the scroll view was scrolled, NO if there is no scroll ancestor or the
+// element is already as centered as the content allows (in which case scrolling cannot
+// uncover it and the caller should fail with the original error).
++ (BOOL)KIF_revealPossiblyCoveredAccessibilityElement:(UIAccessibilityElement *)element view:(UIView *)view;
 {
-    NSPredicate *closestMatchingPredicate = [self findClosestMatchingPredicate:failingPredicate];
+    // The view itself is a candidate: a scroll view acting as the accessibility
+    // container resolves as the element's containing view.
+    UIScrollView *scrollView = nil;
+    for (UIView *candidate = view; candidate; candidate = candidate.superview) {
+        if ([candidate isKindOfClass:[UIScrollView class]]) {
+            scrollView = (UIScrollView *)candidate;
+            break;
+        }
+    }
+    if (!scrollView) {
+        return NO;
+    }
+
+    CGRect elementFrame = [view.window convertRect:element.accessibilityFrame toView:scrollView];
+    UIEdgeInsets contentInset = scrollView.adjustedContentInset;
+    CGFloat visibleHeight = CGRectGetHeight(scrollView.bounds) - contentInset.top - contentInset.bottom;
+    if (visibleHeight <= 0) {
+        return NO;
+    }
+
+    CGFloat minOffsetY = -contentInset.top;
+    CGFloat maxOffsetY = MAX(minOffsetY, scrollView.contentSize.height + contentInset.bottom - CGRectGetHeight(scrollView.bounds));
+    CGFloat targetOffsetY = CGRectGetMidY(elementFrame) - contentInset.top - visibleHeight / 2;
+    targetOffsetY = MIN(MAX(targetOffsetY, minOffsetY), maxOffsetY);
+    if (fabs(targetOffsetY - scrollView.contentOffset.y) < 1) {
+        return NO;
+    }
+
+    BOOL animationEnabled = [KIFUITestActor testActorAnimationsEnabled];
+    [scrollView setContentOffset:CGPointMake(scrollView.contentOffset.x, targetOffsetY) animated:animationEnabled];
+    CFTimeInterval delay = animationEnabled ? 0.3 : 0.05;
+    KIFRunLoopRunInModeRelativeToAnimationSpeed(kCFRunLoopDefaultMode, delay, false);
+    return YES;
+}
+
++ (NSError *)errorForFailingPredicate:(NSPredicate*)failingPredicate disableScroll:(BOOL) scrollDisabled;
+{
+    NSPredicate *closestMatchingPredicate = [self findClosestMatchingPredicate:failingPredicate disableScroll:scrollDisabled];
     if (closestMatchingPredicate) {
         return [NSError KIFErrorWithFormat:@"Found element with %@ but not %@", \
                 closestMatchingPredicate.kifPredicateDescription, \
@@ -255,7 +326,7 @@ MAKE_CATEGORIES_LOADABLE(UIAccessibilityElement_KIFAdditions)
     return [NSError KIFErrorWithFormat:@"Could not find element with %@", failingPredicate.kifPredicateDescription];
 }
 
-+ (NSPredicate *)findClosestMatchingPredicate:(NSPredicate *)aPredicate;
++ (NSPredicate *)findClosestMatchingPredicate:(NSPredicate *)aPredicate disableScroll:(BOOL) scrollDisabled;
 {
     if (!aPredicate) {
         return nil;
@@ -263,7 +334,7 @@ MAKE_CATEGORIES_LOADABLE(UIAccessibilityElement_KIFAdditions)
     
     UIAccessibilityElement *match = [[UIApplication sharedApplication] accessibilityElementMatchingBlock:^BOOL (UIAccessibilityElement *element) {
         return [aPredicate evaluateWithObject:element];
-    }];
+    } disableScroll:scrollDisabled];
     if (match) {
         return aPredicate;
     }
@@ -281,7 +352,7 @@ MAKE_CATEGORIES_LOADABLE(UIAccessibilityElement_KIFAdditions)
             if (predicateMinusOneCondition) {
                 UIAccessibilityElement *match = [[UIApplication sharedApplication] accessibilityElementMatchingBlock:^BOOL (UIAccessibilityElement *element) {
                     return [predicateMinusOneCondition evaluateWithObject:element];
-                }];
+                } disableScroll:scrollDisabled];
                 if (match) {
                     return predicateMinusOneCondition;
                 }

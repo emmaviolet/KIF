@@ -2,7 +2,7 @@
 //  See the LICENSE file distributed with this work for the terms under
 //  which Square, Inc. licenses this file to you.
 
-#import <KIF/KIF.h>
+@import KIF;
 
 #import "BasicCalculatorRobot.h"
 
@@ -30,7 +30,20 @@
 
 - (void)setOperation:(NSString *)operation
 {
-    [[viewTester usingLabel:operation] tap];
+    // A segmented control labels each of its segments with the title it displays, so the segment
+    // for an operation is found by its operator. Tests read better when they name the operation
+    // instead, which makes the robot the place where those two vocabularies meet.
+    NSDictionary<NSString *, NSString *> *operatorsByOperation = @{
+        @"Add": @"+",
+        @"Subtract": @"–",
+        @"Multiply": @"×",
+        @"Divide": @"÷",
+    };
+
+    NSString *operatorTitle = operatorsByOperation[operation];
+    NSAssert(operatorTitle != nil, @"Unknown operation (%@)", operation);
+
+    [[viewTester usingLabel:operatorTitle] tap];
 }
 
 - (void)waitForResult:(NSString *)result

@@ -36,20 +36,6 @@ typedef NS_ENUM(NSInteger, CalculatorOperation) {
     return self;
 }
 
-- (void)setAccessibilityLabel:(NSString *)label forSegment:(NSInteger)segment
-{
-    UIView *view = (self.operationInput.subviews)[self.operationInput.subviews.count - segment - 1];
-    view.accessibilityLabel = label;
-}
-
-- (void)viewDidLoad
-{
-    [self setAccessibilityLabel:@"Add" forSegment:Add];
-    [self setAccessibilityLabel:@"Subtract" forSegment:Subtract];
-    [self setAccessibilityLabel:@"Multiply" forSegment:Multiply];
-    [self setAccessibilityLabel:@"Divide" forSegment:Divide];
-}
-
 - (IBAction)recalculate
 {
     double value1 = self.input1.text.doubleValue;

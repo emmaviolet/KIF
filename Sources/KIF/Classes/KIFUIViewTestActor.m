@@ -12,9 +12,11 @@
 #import "KIFTestActor_Private.h"
 #import "KIFUIObject.h"
 #import "KIFUITestActor_Private.h"
+#import "NSObject+KIFAdditions.h"
 #import "NSPredicate+KIFAdditions.h"
 #import "NSString+KIFAdditions.h"
 #import "UIAccessibilityElement-KIFAdditions.h"
+#import "UIAccessibilityCustomAction+KIFAdditions.h"
 #import "UIApplication-KIFAdditions.h"
 #import "UIWindow-KIFAdditions.h"
 #import "UIDatePicker+KIFAdditions.h"
@@ -24,6 +26,7 @@
 @property (nonatomic, strong, readonly) KIFUITestActor *actor;
 @property (nonatomic, strong, readwrite) NSPredicate *predicate;
 @property (nonatomic, assign) BOOL validateEnteredText;
+@property (nonatomic, assign) BOOL disablingAutomaticScroll;
 
 @end
 
@@ -39,6 +42,7 @@ NSString *const inputFieldTestString = @"Testing";
     self = [super initWithFile:file line:line delegate:delegate];
     NSParameterAssert(self);
     _validateEnteredText = YES;
+    _disablingAutomaticScroll = NO;
     return self;
 }
 
@@ -47,6 +51,12 @@ NSString *const inputFieldTestString = @"Testing";
 - (instancetype)validateEnteredText:(BOOL)validateEnteredText;
 {
     self.validateEnteredText = validateEnteredText;
+    return self;
+}
+
+- (instancetype)usingCurrentFrame;
+{
+    self.disablingAutomaticScroll = YES;
     return self;
 }
 
@@ -107,7 +117,9 @@ NSString *const inputFieldTestString = @"Testing";
 
 - (instancetype)usingTraits:(UIAccessibilityTraits)accessibilityTraits;
 {
-    NSPredicate *predicate = [NSPredicate predicateWithFormat:@"(accessibilityTraits & %@) == %@", @(accessibilityTraits), @(accessibilityTraits)];
+    NSPredicate *predicate = [NSPredicate predicateWithBlock:^BOOL(id  _Nullable evaluatedObject, NSDictionary<NSString *,id> * _Nullable bindings) {
+        return ([evaluatedObject accessibilityTraits] & accessibilityTraits) == accessibilityTraits;
+    }];
     predicate.kifPredicateDescription = [NSString stringWithFormat:@"Accessibility traits including \"%@\"", [UIAccessibilityElement stringFromAccessibilityTraits:accessibilityTraits]];
     
     return [self usingPredicate:predicate];
@@ -115,7 +127,9 @@ NSString *const inputFieldTestString = @"Testing";
 
 - (instancetype)usingAbsenceOfTraits:(UIAccessibilityTraits)accessibilityTraits;
 {
-    NSPredicate *predicate = [NSPredicate predicateWithFormat:@"(accessibilityTraits & %@) != %@", @(accessibilityTraits), @(accessibilityTraits)];
+    NSPredicate *predicate = [NSPredicate predicateWithBlock:^BOOL(id  _Nullable evaluatedObject, NSDictionary<NSString *,id> * _Nullable bindings) {
+        return ([evaluatedObject accessibilityTraits] & accessibilityTraits) != accessibilityTraits;
+    }];
     predicate.kifPredicateDescription = [NSString stringWithFormat:@"Accessibility traits excluding \"%@\"", [UIAccessibilityElement stringFromAccessibilityTraits:accessibilityTraits]];
 
     return [self usingPredicate:predicate];
@@ -151,6 +165,15 @@ NSString *const inputFieldTestString = @"Testing";
     return [self usingPredicate:predicate];
 }
 
+- (instancetype)usingCustomActionWithName:(NSString *)name
+{
+    NSPredicate *predicate = [NSPredicate predicateWithBlock:^BOOL(id evaluatedObject, NSDictionary *bindings) {
+        return ([evaluatedObject KIF_customActionWithName:name] != nil);
+    }];
+    predicate.kifPredicateDescription = [NSString stringWithFormat:@"Custom Action with name equal to \"%@\"", name];
+    return [self usingPredicate:predicate];
+}
+
 #pragma mark - System Actions
 
 #if TARGET_IPHONE_SIMULATOR
@@ -180,9 +203,6 @@ NSString *const inputFieldTestString = @"Testing";
 - (void)waitForAbsenceOfView;
 {
     [self runBlock:^KIFTestStepResult(NSError **error) {
-        // If the app is ignoring interaction events, then wait before doing our analysis
-        KIFTestWaitCondition(![[UIApplication sharedApplication] isIgnoringInteractionEvents], error, @"Application is ignoring interaction events.");
-        
         // If the element can't be found, then we're done
         KIFUIObject *found = [self _predicateSearchWithRequiresMatch:NO mustBeTappable:NO];
         if (!found) {
@@ -193,8 +213,8 @@ NSString *const inputFieldTestString = @"Testing";
         KIFTestWaitCondition(found.view, error, @"Cannot find view containing accessibility element \"%@\"", found.element);
         
         // Hidden views count as absent
-        KIFTestWaitCondition([found.view isHidden] || [found.view superview] == nil, error, @"Accessibility element \"%@\" is visible and not hidden.", found);
-        
+        KIFTestWaitCondition([found.view isHidden] || [found.view superview] == nil || ![found.view isPossiblyVisibleInWindow], error, @"Accessibility element \"%@\" is visible and not hidden.", found);
+
         return KIFTestStepResultSuccess;
     }];
 }
@@ -305,25 +325,40 @@ NSString *const inputFieldTestString = @"Testing";
 
 - (void)enterText:(NSString *)text expectedResult:(NSString *)expectedResult;
 {
+    [self enterText:text expectedResult:expectedResult characterTypingDelay:0.0];
+}
+
+- (void)enterText:(NSString *)text expectedResult:(NSString *)expectedResult characterTypingDelay:(CFTimeInterval)characterTypingDelay;
+{
     if (!self.validateEnteredText && expectedResult) {
         [self failWithMessage:@"Can't supply an expectedResult string if `validateEnteredText` is NO."];
     }
 
     @autoreleasepool {
         KIFUIObject *found = [self _predicateSearchWithRequiresMatch:YES mustBeTappable:NO];
-        [self.actor enterText:text intoElement:found.element inView:found.view expectedResult:expectedResult];
+        [self.actor enterText:text intoElement:found.element inView:found.view expectedResult:expectedResult characterTypingDelay:characterTypingDelay];
     }
 }
 
 - (void)clearAndEnterText:(NSString *)text;
 {
-    [self clearAndEnterText:text expectedResult:nil];
+    [self clearAndEnterText:text expectedResult:nil characterTypingDelay:0.0];
+}
+
+- (void)clearAndEnterText:(NSString *)text characterTypingDelay:(CFTimeInterval)characterTypingDelay;
+{
+    [self clearAndEnterText:text expectedResult:nil characterTypingDelay:characterTypingDelay];
 }
 
 - (void)clearAndEnterText:(NSString *)text expectedResult:(NSString *)expectedResult;
 {
+    [self clearAndEnterText:text expectedResult:expectedResult characterTypingDelay:0.0];
+}
+
+- (void)clearAndEnterText:(NSString *)text expectedResult:(NSString *)expectedResult characterTypingDelay:(CFTimeInterval)characterTypingDelay;
+{
     [self clearText];
-    [self enterText:text expectedResult:expectedResult];
+    [self enterText:text expectedResult:expectedResult characterTypingDelay:characterTypingDelay];
 }
 
 - (void)enterTextIntoCurrentFirstResponder:(NSString *)text;
@@ -373,6 +408,83 @@ NSString *const inputFieldTestString = @"Testing";
     @autoreleasepool {
         KIFUIObject *found = [self _predicateSearchWithRequiresMatch:YES mustBeTappable:NO];
         [self.actor swipeAccessibilityElement:found.element inView:found.view inDirection:direction];
+    }
+}
+
+- (void)swipeFromEdge:(UIRectEdge)edge
+{
+    [self.actor swipeFromEdge:edge];
+}
+
+#pragma mark - Accesibility Actions
+
+- (void)activateCustomActionWithName:(NSString *)name;{
+    [self activateCustomActionWithName:name expectedResult:YES];
+}
+
+- (void)activateCustomActionWithName:(NSString *)name expectedResult:(BOOL)expectedResult;
+{
+    @autoreleasepool {
+        KIFUIObject *found = [self _predicateSearchWithRequiresMatch:YES mustBeTappable:NO];
+        
+        [self runBlock:^KIFTestStepResult(NSError **error) {
+            if ([[found.element KIF_customActionWithName:name] KIF_activate] == expectedResult) {
+                [self waitForAnimationsToFinish];
+                return KIFTestStepResultSuccess;
+            }
+            [self waitForAnimationsToFinish];
+            return KIFTestStepResultFailure;
+        }];
+    }
+}
+
+- (void)performAccessibilityActivateWithExpectedResult:(BOOL)expectedResult;
+{
+    @autoreleasepool {
+        KIFUIObject *found = [self _predicateSearchWithRequiresMatch:YES mustBeTappable:NO];
+        
+        [self runBlock:^KIFTestStepResult(NSError **error) {
+            if ([found.element accessibilityActivate] == expectedResult) {
+                [self waitForAnimationsToFinish];
+                return KIFTestStepResultSuccess;
+            }
+            [self waitForAnimationsToFinish];
+            return KIFTestStepResultFailure;
+        }];
+    }
+}
+
+- (void)performAccessibilityIncrement;
+{
+    @autoreleasepool {
+        KIFUIObject *found = [self _predicateSearchWithRequiresMatch:YES mustBeTappable:NO];
+        
+        [self runBlock:^KIFTestStepResult(NSError **error) {
+            if ([found.element KIF_isAccessibilityAdjustable]) {
+                [found.element accessibilityIncrement];
+                [self waitForAnimationsToFinish];
+                return KIFTestStepResultSuccess;
+            }
+            [self waitForAnimationsToFinish];
+            return KIFTestStepResultFailure;
+        }];
+    }
+}
+
+- (void)performAccessibilityDecrement;
+{
+    @autoreleasepool {
+        KIFUIObject *found = [self _predicateSearchWithRequiresMatch:YES mustBeTappable:NO];
+        
+        [self runBlock:^KIFTestStepResult(NSError **error) {
+            if ([found.element KIF_isAccessibilityAdjustable]) {
+                [found.element accessibilityDecrement];
+                [self waitForAnimationsToFinish];
+                return KIFTestStepResultSuccess;
+            }
+            [self waitForAnimationsToFinish];
+            return KIFTestStepResultFailure;
+        }];
     }
 }
 
@@ -598,11 +710,11 @@ NSString *const inputFieldTestString = @"Testing";
     __block UIAccessibilityElement *foundElement = nil;
 
     if (requiresMatch) {
-        [self.actor waitForAccessibilityElement:&foundElement view:&foundView withElementMatchingPredicate:self.predicate tappable:tappable];
+        [self.actor waitForAccessibilityElement:&foundElement view:&foundView withElementMatchingPredicate:self.predicate tappable:tappable disableScroll:self.disablingAutomaticScroll];
     } else {
         NSError *error;
         [self tryRunningBlock:^KIFTestStepResult(NSError **error) {
-            KIFTestWaitCondition([self.actor tryFindingAccessibilityElement:&foundElement view:&foundView withElementMatchingPredicate:self.predicate tappable:tappable error:error], error, @"Waiting on view matching %@", self.predicate.kifPredicateDescription);
+            KIFTestWaitCondition([self.actor tryFindingAccessibilityElement:&foundElement view:&foundView withElementMatchingPredicate:self.predicate tappable:tappable error:error disableScroll:self.disablingAutomaticScroll], error, @"Waiting on view matching %@", self.predicate.kifPredicateDescription);
             return KIFTestStepResultSuccess;
         } complete:nil timeout:1.0 error:&error];
     }

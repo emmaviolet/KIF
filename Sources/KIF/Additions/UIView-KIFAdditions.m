@@ -17,6 +17,9 @@
 #import "KIFUITestActor.h"
 #import <WebKit/WebKit.h>
 
+#define DRAG_TOUCH_DELAY 0.01
+#define CELL_SCROLL_DELAY_STABILIZATION 0.05
+
 double KIFDegreesToRadians(double deg) {
     return (deg) / 180.0 * M_PI;
 }
@@ -132,10 +135,56 @@ NS_INLINE BOOL StringsMatchExceptLineBreaks(NSString *expected, NSString *actual
 
 - (UIAccessibilityElement *)accessibilityElementMatchingBlock:(BOOL(^)(UIAccessibilityElement *))matchBlock;
 {
-    return [self accessibilityElementMatchingBlock:matchBlock notHidden:YES];
+    return [self accessibilityElementMatchingBlock:matchBlock disableScroll:NO];
 }
 
-- (UIAccessibilityElement *)accessibilityElementMatchingBlock:(BOOL(^)(UIAccessibilityElement *))matchBlock notHidden:(BOOL)notHidden;
+- (UIAccessibilityElement *)accessibilityElementMatchingBlock:(BOOL(^)(UIAccessibilityElement *))matchBlock disableScroll:(BOOL)scrollDisabled;
+{
+    return [self accessibilityElementMatchingBlock:matchBlock notHidden:YES disableScroll:scrollDisabled];
+}
+
+- (BOOL)isPossiblyVisibleInWindow
+{
+    if (self.alpha == 0) {
+        return NO;
+    }
+
+    if ([self isVisibleInWindowFrame]) {
+        return YES;
+    } else {
+        // This is a fix when a view is not hidden but outside of visible area and scrollable content size
+        //
+        // scroll view scrollable content
+        // -------------
+        // |           |
+        // |scrollView |    View is not hidden and it's out of the scollable content
+        // |           |     -----
+        // |           |     |   | <- a subview of the scrollView
+        // |           |     |   |
+        // -------------     -----
+        //
+        // We want to detect that if the view is there but it's out of the scrollable content size
+        // If it's out of the scrollable content size, we consider as not visible
+        //
+        // We are only interested if the parent is a scrollView and NOT collectionView and NOT tableView
+        UIScrollView *scrollView = (UIScrollView *)[self ancestorScrollView];
+        // if scrollView is within a tappable point, that means we can check to see if `self` is viewable within content size
+        //
+        // TODO: We haven't handled if a scrollView is inside another scrollView
+        if (scrollView && scrollView.isTappable) {
+            CGSize scrollViewSize = scrollView.contentSize;
+            BOOL isXVisible = scrollViewSize.width >= self.frame.origin.x;
+            BOOL isYVisible = scrollViewSize.height >= self.frame.origin.y;
+            BOOL isSelfVisible = isXVisible && isYVisible;
+
+            return isSelfVisible;
+        }
+
+        return NO;
+    }
+}
+
+- (UIAccessibilityElement *)accessibilityElementMatchingBlock:(BOOL(^)(UIAccessibilityElement *))matchBlock notHidden:(BOOL)notHidden disableScroll:(BOOL)scrollDisabled;
 {
     if (notHidden && self.hidden) {
         return nil;
@@ -163,7 +212,14 @@ NS_INLINE BOOL StringsMatchExceptLineBreaks(NSString *expected, NSString *actual
     // rather than the real subviews it contains. We want the real views if possible.
     // UITableViewCell is such an offender.
     for (UIView *view in [self.subviews reverseObjectEnumerator]) {
-        UIAccessibilityElement *element = [view accessibilityElementMatchingBlock:matchBlock];
+
+        UIAccessibilityElement *element = [view accessibilityElementMatchingBlock:matchBlock disableScroll:scrollDisabled];
+
+        if (!element) {
+            UIView* fallbackView = [self tryGetiOS16KeyboardFallbackViewFromParentView:view];
+            element = [fallbackView accessibilityElementMatchingBlock:matchBlock disableScroll:scrollDisabled];
+        }
+        
         if (!element) {
             continue;
         }
@@ -173,7 +229,7 @@ NS_INLINE BOOL StringsMatchExceptLineBreaks(NSString *expected, NSString *actual
         
         if ([viewForElement isTappableInRect:accessibilityFrame]) {
             return element;
-        } else {
+        } else if (!scrollDisabled || [viewForElement isVisibleInWindowFrame]){
             matchingButOccludedElement = element;
         }
     }
@@ -192,7 +248,7 @@ NS_INLINE BOOL StringsMatchExceptLineBreaks(NSString *expected, NSString *actual
 
             if ([viewForElement isTappableInRect:accessibilityFrame]) {
                 return element;
-            } else {
+            } else if (!scrollDisabled || [viewForElement isVisibleInWindowFrame]){
                 matchingButOccludedElement = element;
                 continue;
             }
@@ -225,9 +281,11 @@ NS_INLINE BOOL StringsMatchExceptLineBreaks(NSString *expected, NSString *actual
         }
     }
     
-    if (!matchingButOccludedElement && self.window) {
+    if (!scrollDisabled && !matchingButOccludedElement && self.window) {
         CGPoint scrollContentOffset = {-1.0, -1.0};
         UIScrollView *scrollView = nil;
+
+        // Table view - scroll to non visible cells
         if ([self isKindOfClass:[UITableView class]]) {
             NSString * subViewName = nil;
             //special case for UIPickerView (which has a private class UIPickerTableView)
@@ -255,7 +313,6 @@ NS_INLINE BOOL StringsMatchExceptLineBreaks(NSString *expected, NSString *actual
                 }
             }];
 
-            CFTimeInterval delay = 0.05;
             for (NSUInteger section = 0, numberOfSections = [tableView numberOfSections]; section < numberOfSections; section++) {
                 for (NSUInteger row = 0, numberOfRows = [tableView numberOfRowsInSection:section]; row < numberOfRows; row++) {
                     if (!self.window) {
@@ -273,12 +330,12 @@ NS_INLINE BOOL StringsMatchExceptLineBreaks(NSString *expected, NSString *actual
                     }
 
                     @autoreleasepool {
-                        // Scroll to the cell and wait for the animation to complete. Using animations here may not be optimal.
+                        // Scroll to the cell and wait for the animation to complete.
                         CGRect sectionRect = [tableView rectForRowAtIndexPath:indexPath];
                         [tableView scrollRectToVisible:sectionRect animated:NO];
 
                         UITableViewCell *cell = [tableView cellForRowAtIndexPath:indexPath];
-                        UIAccessibilityElement *element = [cell accessibilityElementMatchingBlock:matchBlock notHidden:NO];
+                        UIAccessibilityElement *element = [cell accessibilityElementMatchingBlock:matchBlock notHidden:NO disableScroll:NO];
 
                         // Skip this cell if it isn't the one we're looking for
                         if (!element) {
@@ -287,24 +344,25 @@ NS_INLINE BOOL StringsMatchExceptLineBreaks(NSString *expected, NSString *actual
                     }
 
                     // Note: using KIFRunLoopRunInModeRelativeToAnimationSpeed here may cause tests to stall
-                    CFRunLoopRunInMode(UIApplicationCurrentRunMode, delay, false);
-                    return [self accessibilityElementMatchingBlock:matchBlock];
+                    CFRunLoopRunInMode(UIApplicationCurrentRunMode, CELL_SCROLL_DELAY_STABILIZATION, false);
+                    return [self accessibilityElementMatchingBlock:matchBlock disableScroll:NO];
                 }
             }
 
 			//if we're in a picker (scrollView), let's make sure we set the position back to how it was last set.
-            if(scrollView != nil && scrollContentOffset.x != -1.0)
+            if (scrollView != nil && scrollContentOffset.x != -1.0)
             {
                 [scrollView setContentOffset:scrollContentOffset];
             } else {
                 [tableView setContentOffset:initialPosition.origin];
             }
-            CFRunLoopRunInMode(UIApplicationCurrentRunMode, delay, false);
+
+            CFRunLoopRunInMode(UIApplicationCurrentRunMode, CELL_SCROLL_DELAY_STABILIZATION, false);
         } else if ([self isKindOfClass:[UICollectionView class]]) {
             UICollectionView *collectionView = (UICollectionView *)self;
-            
+            CGRect initialPosition = CGRectMake(collectionView.contentOffset.x, collectionView.contentOffset.y, collectionView.frame.size.width, collectionView.frame.size.height);
             NSArray *indexPathsForVisibleItems = [collectionView indexPathsForVisibleItems];
-            
+
             for (NSUInteger section = 0, numberOfSections = [collectionView numberOfSections]; section < numberOfSections; section++) {
                 for (NSUInteger item = 0, numberOfItems = [collectionView numberOfItemsInSection:section]; item < numberOfItems; item++) {
                     if (!self.window) {
@@ -316,41 +374,77 @@ NS_INLINE BOOL StringsMatchExceptLineBreaks(NSString *expected, NSString *actual
                     if ([indexPathsForVisibleItems containsObject:indexPath]) {
                         continue;
                     }
-                    
-                    @autoreleasepool {
-                        // Get the cell directly from the dataSource because UICollectionView will only vend visible cells
-                        UICollectionViewCell *cell = [collectionView.dataSource collectionView:collectionView cellForItemAtIndexPath:indexPath];
 
-                        // The cell contents might change just prior to being displayed, so we simulate the cell appearing onscreen
-                        if ([collectionView.delegate respondsToSelector:@selector(collectionView:willDisplayCell:forItemAtIndexPath:)]) {
-                            [collectionView.delegate collectionView:collectionView willDisplayCell:cell forItemAtIndexPath:indexPath];
+                    if (@available(iOS 18, *)) {
+                        @autoreleasepool {
+                            CGRect visibleRect = [collectionView layoutAttributesForItemAtIndexPath:indexPath].frame;
+                            [collectionView scrollRectToVisible:visibleRect animated:NO];
+                            [collectionView layoutIfNeeded];
+                            UICollectionViewCell *cell = [collectionView cellForItemAtIndexPath:indexPath];
+                            for (NSUInteger attempts = 0; attempts < 10 && !cell && collectionView.window; attempts++) {
+                                CFRunLoopRunInMode(UIApplicationCurrentRunMode, 0.01, false);
+                                cell = [collectionView cellForItemAtIndexPath:indexPath];
+                            }
+                            if (cell == nil) {
+                                [collectionView scrollToItemAtIndexPath:indexPath atScrollPosition:UICollectionViewScrollPositionNone animated:NO];
+                                [collectionView layoutIfNeeded];
+                                cell = [collectionView cellForItemAtIndexPath:indexPath];
+                            }
+                            // Skip this cell if it can't be found
+                            if (!cell) {
+                                continue;
+                            }
+                            UIAccessibilityElement *element = [cell accessibilityElementMatchingBlock:matchBlock notHidden:NO disableScroll:NO];
+
+                            // Skip this cell if it isn't the one we're looking for
+                            if (!element) {
+                                continue;
+                            }
                         }
-                        
-                        UIAccessibilityElement *element = [cell accessibilityElementMatchingBlock:matchBlock notHidden:NO];
-                        
-                        // Remove the cell from the collection view so that it doesn't stick around
-                        [cell removeFromSuperview];
-                        
-                        // Skip this cell if it isn't the one we're looking for
-                        // Sometimes we get cells with no size here which can cause an endless loop, so we ignore those
-                        if (!element || CGSizeEqualToSize(cell.frame.size, CGSizeZero)) {
-                            continue;
+
+                        // Note: using KIFRunLoopRunInModeRelativeToAnimationSpeed here may cause tests to stall
+                        CFRunLoopRunInMode(UIApplicationCurrentRunMode, CELL_SCROLL_DELAY_STABILIZATION, false);
+                        return [self accessibilityElementMatchingBlock:matchBlock disableScroll:NO];
+                    } else {
+                        @autoreleasepool {
+                            // Get the cell directly from the dataSource because UICollectionView will only vend visible cells
+                            UICollectionViewCell *cell = [collectionView.dataSource collectionView:collectionView cellForItemAtIndexPath:indexPath];
+
+                            // The cell contents might change just prior to being displayed, so we simulate the cell appearing onscreen
+                            if ([collectionView.delegate respondsToSelector:@selector(collectionView:willDisplayCell:forItemAtIndexPath:)]) {
+                                [collectionView.delegate collectionView:collectionView willDisplayCell:cell forItemAtIndexPath:indexPath];
+                            }
+
+                            UIAccessibilityElement *element = [cell accessibilityElementMatchingBlock:matchBlock notHidden:NO disableScroll:NO];
+
+                            // Remove the cell from the collection view so that it doesn't stick around
+                            [cell removeFromSuperview];
+
+                            // Skip this cell if it isn't the one we're looking for
+                            // Sometimes we get cells with no size here which can cause an endless loop, so we ignore those
+                            if (!element || CGSizeEqualToSize(cell.frame.size, CGSizeZero)) {
+                                continue;
+                            }
                         }
+
+                        // Scroll to the cell and wait for the animation to complete
+                        CGRect frame = [collectionView.collectionViewLayout layoutAttributesForItemAtIndexPath:indexPath].frame;
+                        [collectionView scrollRectToVisible:frame animated:YES];
+                        // Note: using KIFRunLoopRunInModeRelativeToAnimationSpeed here may cause tests to stall
+                        CFRunLoopRunInMode(UIApplicationCurrentRunMode, 0.5, false);
+
+                        // Now try finding the element again
+                        return [self accessibilityElementMatchingBlock:matchBlock];
                     }
-                    
-                    // Scroll to the cell and wait for the animation to complete
-                    CGRect frame = [collectionView.collectionViewLayout layoutAttributesForItemAtIndexPath:indexPath].frame;
-                    [collectionView scrollRectToVisible:frame animated:YES];
-                    // Note: using KIFRunLoopRunInModeRelativeToAnimationSpeed here may cause tests to stall
-                    CFRunLoopRunInMode(UIApplicationCurrentRunMode, 0.5, false);
-                    
-                    // Now try finding the element again
-                    return [self accessibilityElementMatchingBlock:matchBlock];
                 }
             }
+
+            [collectionView setContentOffset:initialPosition.origin];
+            [collectionView layoutIfNeeded];
+            CFRunLoopRunInMode(UIApplicationCurrentRunMode, CELL_SCROLL_DELAY_STABILIZATION, false);
         }
     }
-    
+
     return matchingButOccludedElement;
 }
 
@@ -374,12 +468,23 @@ NS_INLINE BOOL StringsMatchExceptLineBreaks(NSString *expected, NSString *actual
         if ([NSStringFromClass([view class]) hasPrefix:prefix]) {
             [result addObject:view];
         }
+        
+        UIView* fallbackView = [self tryGetiOS16KeyboardFallbackViewFromParentView:view];
+        if ([NSStringFromClass([fallbackView class]) hasPrefix:prefix]) {
+            [result addObject:fallbackView];
+        }
     }
     
     // Now traverse the subviews of the subviews, adding matches.
     for (UIView *view in self.subviews) {
         NSArray *matchingSubviews = [view subviewsWithClassNamePrefix:prefix];
         [result addObjectsFromArray:matchingSubviews];
+        
+        UIView* fallbackView = [self tryGetiOS16KeyboardFallbackViewFromParentView:view];
+        if (fallbackView) {
+            NSArray *matchingSubviews = [fallbackView subviewsWithClassNamePrefix:prefix];
+            [result addObjectsFromArray:matchingSubviews];
+        }
     }
 
     return result;
@@ -403,14 +508,30 @@ NS_INLINE BOOL StringsMatchExceptLineBreaks(NSString *expected, NSString *actual
     // First traverse the next level of subviews, adding matches
     for (UIView *view in self.subviews) {
         Class klass = [view class];
+
         while (klass) {
             if ([NSStringFromClass(klass) hasPrefix:prefix]) {
                 [result addObject:view];
                 break;
             }
             
+            UIView* fallbackView = [self tryGetiOS16KeyboardFallbackViewFromParentView:view];
+            if (fallbackView) {
+                Class klass = [fallbackView class];
+                while (klass) {
+                    if ([NSStringFromClass(klass) hasPrefix:prefix]) {
+                        [result addObject:fallbackView];
+                        break;
+                    }
+                    
+                    klass = [klass superclass];
+                }
+            }
+            
             klass = [klass superclass];
         }
+        
+        
     }
     
     // Now traverse the subviews of the subviews, adding matches
@@ -458,10 +579,6 @@ NS_INLINE BOOL StringsMatchExceptLineBreaks(NSString *expected, NSString *actual
     id /*UIWebBrowserView*/ webBrowserView = nil;
 
     BOOL isWebView = [self isKindOfClass:[WKWebView class]];
-
-#if  __IPHONE_OS_VERSION_MIN_REQUIRED < __IPHONE_12_0
-    isWebView = isWebView || [self isKindOfClass:[UIWebView class]];
-#endif
     
     if ([NSStringFromClass([self class]) isEqual:@"UIWebBrowserView"]) {
         webBrowserView = self;
@@ -478,13 +595,12 @@ NS_INLINE BOOL StringsMatchExceptLineBreaks(NSString *expected, NSString *actual
     // Handle touches in the normal way for other views
     UITouch *touch = [[UITouch alloc] initAtPoint:point inView:self];
     [touch setPhaseAndUpdateTimestamp:UITouchPhaseBegan];
-    
-    UIEvent *event = [self eventWithTouch:touch];
+    UIEvent *beganEvent = [self eventWithTouch:touch];
+    [[UIApplication sharedApplication] kif_sendEvent:beganEvent];
 
-    [[UIApplication sharedApplication] kif_sendEvent:event];
-    
     [touch setPhaseAndUpdateTimestamp:UITouchPhaseEnded];
-    [[UIApplication sharedApplication] kif_sendEvent:event];
+    UIEvent *endedEvent = [self eventWithTouch:touch];
+    [[UIApplication sharedApplication] kif_sendEvent:endedEvent];
 
     // Dispatching the event doesn't actually update the first responder, so fake it
     if ([touch.view isDescendantOfView:self] && [self canBecomeFirstResponder]) {
@@ -509,8 +625,6 @@ NS_INLINE BOOL StringsMatchExceptLineBreaks(NSString *expected, NSString *actual
 
     [[UIApplication sharedApplication] kif_sendEvent:event];
 }
-
-#define DRAG_TOUCH_DELAY 0.01
 
 - (void)longPressAtPoint:(CGPoint)point duration:(NSTimeInterval)duration
 {
@@ -562,6 +676,27 @@ NS_INLINE BOOL StringsMatchExceptLineBreaks(NSString *expected, NSString *actual
     [self dragPointsAlongPaths:@[path]];
 }
 
+- (void)dragFromEdge:(UIRectEdge)startEdge toEdge:(UIRectEdge)endEdge
+{
+    CGFloat width = self.bounds.size.width;
+    CGFloat height = self.bounds.size.height;
+    CGFloat edgeInset = 0.5;
+    NSDictionary *edgeToPoint = @{
+        @(UIRectEdgeTop): @(CGPointMake(width / 2, edgeInset)),
+        @(UIRectEdgeLeft): @(CGPointMake(edgeInset, height / 2)),
+        @(UIRectEdgeBottom): @(CGPointMake(width / 2, height - edgeInset)),
+        @(UIRectEdgeRight): @(CGPointMake(width - edgeInset, height / 2)),
+    };
+    CGPoint startPoint = [edgeToPoint[@(startEdge)] CGPointValue];
+    CGPoint endPoint = [edgeToPoint[@(endEdge)] CGPointValue];
+    
+    CGPoint screenPoint = [self convertPoint:startPoint toView:self.window];
+    BOOL isFromScreenEdge = (screenPoint.x < 1 || screenPoint.x > self.window.bounds.size.width - 1);
+    
+    NSArray<NSValue *> *path = [self pointsFromStartPoint:startPoint toPoint:endPoint steps:20];
+    [self dragPointsAlongPaths:@[path] isFromEdge:isFromScreenEdge];
+}
+
 - (void)dragAlongPathWithPoints:(CGPoint *)points count:(NSInteger)count;
 {
     // convert point array into NSArray with NSValue
@@ -574,6 +709,10 @@ NS_INLINE BOOL StringsMatchExceptLineBreaks(NSString *expected, NSString *actual
 }
 
 - (void)dragPointsAlongPaths:(NSArray<NSArray<NSValue *> *> *)arrayOfPaths {
+    [self dragPointsAlongPaths:arrayOfPaths isFromEdge:NO];
+}
+
+- (void)dragPointsAlongPaths:(NSArray<NSArray<NSValue *> *> *)arrayOfPaths isFromEdge:(BOOL)isFromEdge {
     // There must be at least one path with at least one point
     if (arrayOfPaths.count == 0 || arrayOfPaths.firstObject.count == 0)
     {
@@ -618,6 +757,7 @@ NS_INLINE BOOL StringsMatchExceptLineBreaks(NSString *expected, NSString *actual
                 point = [self convertPoint:point fromView:self.window];
                 UITouch *touch = [[UITouch alloc] initAtPoint:point inView:self];
                 [touch setPhaseAndUpdateTimestamp:UITouchPhaseBegan];
+                [touch setIsFromEdge:isFromEdge];
                 [touches addObject:touch];
             }
             UIEvent *eventDown = [self eventWithTouches:[NSArray arrayWithArray:touches]];
@@ -765,11 +905,10 @@ NS_INLINE BOOL StringsMatchExceptLineBreaks(NSString *expected, NSString *actual
 // Is this view currently on screen?
 - (BOOL)isTappable;
 {
-    return ([self hasTapGestureRecognizer] ||
-            [self isTappableInRect:self.bounds]);
+    return [self isTappableInRect:self.bounds];
 }
 
-- (BOOL)hasTapGestureRecognizer
+- (BOOL)hasTapGestureRecognizerAndIsControlEnabled
 {
     __block BOOL hasTapGestureRecognizer = NO;
     
@@ -784,6 +923,14 @@ NS_INLINE BOOL StringsMatchExceptLineBreaks(NSString *expected, NSString *actual
             }
         }
     }];
+    
+    // In iOS 15 UIButton's still have tap gesture recognizers when disabled. 
+    // This prevents a control that is disabled, but still has the system gesture
+    // recognizers to say it's tappable.
+    if ([self isKindOfClass:[UIControl class]]) {
+        UIControl *control = (UIControl *)self;
+        return hasTapGestureRecognizer && control.isEnabled;
+    }
     
     return hasTapGestureRecognizer;
 }
@@ -1012,5 +1159,32 @@ NS_INLINE BOOL StringsMatchExceptLineBreaks(NSString *expected, NSString *actual
     }
 }
 
+- (UIView *)tryGetiOS16KeyboardFallbackViewFromParentView:(UIView*) parentView
+{
+    if([parentView isKindOfClass:NSClassFromString(@"_UIRemoteKeyboardPlaceholderView")]) {
+        UIView* fallbackView = [parentView valueForKey:@"_fallbackView"];
+        return fallbackView;
+    }
+    
+    return nil;
+}
+
+- (nullable UIView *)ancestorScrollView
+{
+    // We don't want collection view and table view because we handle them separately.
+    // This function is only getting a plain scroll view
+    UIView *currentSuperview = self.superview;
+    while (currentSuperview != nil) {
+        if ([currentSuperview isKindOfClass:[UIScrollView class]] &&
+            ![currentSuperview isKindOfClass:[UICollectionView class]] &&
+            ![currentSuperview isKindOfClass:[UITableView class]]) {
+            return currentSuperview;
+        }
+
+        currentSuperview = currentSuperview.superview;
+    }
+
+    return nil;
+}
 
 @end

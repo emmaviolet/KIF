@@ -1,11 +1,11 @@
-// swift-tools-version:5.0
+// swift-tools-version:5.9
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 import PackageDescription
 
 let package = Package(
     name: "KIF",
     platforms: [
-        .iOS(.v8)
+        .iOS(.v15)
     ],
     products: [
         .library(
@@ -17,21 +17,23 @@ let package = Package(
     targets: [
         .target(
             name: "KIF",
-            dependencies: [],
+            dependencies: ["KIFSwift"],
             publicHeadersPath: "include",
             cSettings: [
                 .headerSearchPath("ApplePrivateAPIs/"),
                 .headerSearchPath("Additions/"),
-                .headerSearchPath("Classes/"),
                 .headerSearchPath("Visualizer/"),
-                .headerSearchPath("IdentifierTests/"),
             ],
-            linkerSettings: [.linkedFramework("IOKit")]
+            linkerSettings: [.linkedFramework("IOKit"), .linkedFramework("XCTest")]
+        ),
+        .target(
+            name: "KIFSwift",
+            dependencies: [],
         ),
         .testTarget(
             name: "KIFTests",
             dependencies: ["KIF"],
-            path: "./KIF Tests",
+            path: "./Tests",
             cSettings: [.headerSearchPath("../Sources/KIF/")] // allow to look a "private" headers
         ),
     ]
